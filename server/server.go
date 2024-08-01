@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -20,14 +21,17 @@ const (
 
 func main() {
 
-	socks5.Debug = true
+	socks5.Debug = false
 	s, err := socks5.NewClassicServer(":1080", "localhost", "", "", 5, 5)
 	if err != nil {
 		panic(err)
 	}
-
+	session, err := newSession(pa)
+	if err != nil {
+		panic(err)
+	}
 	hdl := &iHdl{
-		qc: newSession(pa),
+		qc: session,
 	}
 
 	go func() {
@@ -47,7 +51,7 @@ func main() {
 
 }
 
-func newSession(addr string) quic.Connection {
+func newSession(addr string) (quic.Connection, error) {
 
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: true,
@@ -59,9 +63,9 @@ func newSession(addr string) quic.Connection {
 	}
 	session, err := quic.DialAddr(context.Background(), addr, tlsCfg, cfg)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return session
+	return session, nil
 }
 
 type iHdl struct {
@@ -69,6 +73,8 @@ type iHdl struct {
 	outBound atomic.Int64
 
 	qc quic.Connection
+
+	lock sync.RWMutex
 }
 
 func (i *iHdl) State() (int64, int64) {
@@ -80,6 +86,23 @@ type firstReq struct {
 	remoteAddr string
 }
 
+func (i *iHdl) reconnect() error {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	log.Printf("reconnecting server...")
+
+	//i.qc.CloseWithError(999, "reconnect")
+
+	session, err := newSession(pa)
+	if err != nil {
+		log.Printf("reconnect server failed: %v", err)
+		return err
+	}
+	log.Printf("reconnect server success")
+	i.qc = session
+	return nil
+}
+
 func (i *iHdl) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) error {
 	log.Printf("new tcp reqest: %s --> %v", c.RemoteAddr(), r.Address())
 
@@ -87,11 +110,17 @@ func (i *iHdl) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) er
 
 	if r.Cmd == socks5.CmdConnect {
 
+		i.lock.RLock()
 		stream, err := i.qc.OpenStreamSync(ctx)
+		i.lock.RUnlock()
+
 		if err != nil {
 			log.Printf("qc.OpenStreamSync|err=%v", err)
-			replyToClientFail(c, r)
-			return err
+			err := i.reconnect()
+			if err != nil {
+				replyToClientFail(c, r)
+				return err
+			}
 		}
 
 		address := formatAddress(r.Address())
