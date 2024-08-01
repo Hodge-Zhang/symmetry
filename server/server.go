@@ -52,7 +52,12 @@ func newSession(addr string) quic.Connection {
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: true,
 	}
-	session, err := quic.DialAddr(context.Background(), addr, tlsCfg, nil)
+
+	cfg := &quic.Config{
+		MaxIdleTimeout:  60 * time.Second,
+		KeepAlivePeriod: 10 * time.Second,
+	}
+	session, err := quic.DialAddr(context.Background(), addr, tlsCfg, cfg)
 	if err != nil {
 		panic(err)
 	}
@@ -81,15 +86,11 @@ func (i *iHdl) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) er
 	ctx := context.Background()
 
 	if r.Cmd == socks5.CmdConnect {
-		rc, err := r.Connect(c)
-		if err != nil {
-			return err
-		}
-		defer rc.Close()
 
 		stream, err := i.qc.OpenStreamSync(ctx)
 		if err != nil {
 			log.Printf("qc.OpenStreamSync|err=%v", err)
+			replyToClientFail(c, r)
 			return err
 		}
 
@@ -97,6 +98,7 @@ func (i *iHdl) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) er
 		_, err = stream.Write(address)
 		if err != nil {
 			log.Printf("stream.Write(address)|err=%v", err)
+			replyToClientFail(c, r)
 			return err
 		}
 
@@ -104,27 +106,22 @@ func (i *iHdl) TCPHandle(s *socks5.Server, c *net.TCPConn, r *socks5.Request) er
 
 		_, err = stream.Read(rsp)
 		if err != nil {
+			replyToClientFail(c, r)
 			return err
 		}
 		if rsp[0] != 0x1 {
+			replyToClientFail(c, r)
 			return nil
 		}
+
+		replyToClientSuccess(c, r)
 
 		defer stream.Close()
 
 		go func() {
 
-			var bf [1024 * 2]byte
+			var bf [1024 * 4]byte
 			for {
-				//if s.TCPTimeout != 0 {
-				//	if err := rc.SetDeadline(time.Now().Add(time.Duration(s.TCPTimeout) * time.Second)); err != nil {
-				//		return
-				//	}
-				//}
-				//n, err := rc.Read(bf[:])
-				//if err != nil {
-				//	return
-				//}
 
 				n, err := stream.Read(bf[:])
 				if err != nil {
@@ -308,5 +305,31 @@ func (i *iHdl) UDPHandle(s *socks5.Server, addr *net.UDPAddr, d *socks5.Datagram
 			}
 		}
 	}(ue, dst)
+	return nil
+}
+
+func replyToClientSuccess(w io.Writer, r *socks5.Request) error {
+
+	a, addr, port, _ := socks5.ParseAddress(r.Address())
+	if a == socks5.ATYPDomain {
+		addr = addr[1:]
+	}
+	p := socks5.NewReply(socks5.RepSuccess, a, addr, port)
+	if _, err := p.WriteTo(w); err != nil {
+		return err
+	}
+	return nil
+}
+
+func replyToClientFail(w io.Writer, r *socks5.Request) error {
+	var p *socks5.Reply
+	if r.Atyp == socks5.ATYPIPv4 || r.Atyp == socks5.ATYPDomain {
+		p = socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv4, []byte{0x00, 0x00, 0x00, 0x00}, []byte{0x00, 0x00})
+	} else {
+		p = socks5.NewReply(socks5.RepHostUnreachable, socks5.ATYPIPv6, []byte(net.IPv6zero), []byte{0x00, 0x00})
+	}
+	if _, err := p.WriteTo(w); err != nil {
+		return err
+	}
 	return nil
 }

@@ -7,6 +7,8 @@ import (
 	"github.com/quic-go/quic-go"
 	"log"
 	"net"
+	"runtime"
+	"time"
 )
 
 func generateTLSConfig() *tls.Config {
@@ -18,11 +20,21 @@ func generateTLSConfig() *tls.Config {
 }
 
 func main() {
+
+	go monitorGoroutineNums()
+
 	// 创建一个简单的HTTP处理程序
-	testQuic()
+	runServer()
 }
 
-func testQuic() {
+func monitorGoroutineNums() {
+	for {
+		time.Sleep(5 * time.Second)
+		log.Printf("goroutine num:%d", runtime.NumGoroutine())
+	}
+}
+
+func runServer() {
 	tlsConfig := generateTLSConfig()
 
 	listener, err := quic.ListenAddr("localhost:8888", tlsConfig, &quic.Config{})
@@ -41,71 +53,92 @@ func testQuic() {
 
 		go func(sess quic.Connection) {
 			fmt.Println("new session")
-			stream, err := sess.AcceptStream(ctx)
-			if err != nil {
-				log.Fatal(err)
-			}
-			addr := make([]byte, 64)
-			_, err = stream.Read(addr)
-			if err != nil {
-				log.Println(err)
-				return
 
-			}
+			for {
 
-			for i, b := range addr {
-				if rune(b) == rune('$') {
-					addr = addr[:i]
+				stream, err := sess.AcceptStream(ctx)
+				if err != nil {
+					log.Fatal(err)
 				}
-			}
+				go func() {
 
-			conn, err := net.Dial("tcp", string(addr))
-			if err != nil {
-				stream.Write([]byte{0x2})
-				return
-			}
-			_, err = stream.Write([]byte{0x1})
-			if err != nil {
-				log.Println(err)
-			}
-
-			go func() {
-				//defer conn.Close()
-
-				buf := make([]byte, 4*1024)
-
-				for {
-					n, err1 := stream.Read(buf)
-
-					_, err = conn.Write(buf[:n])
+					addr := make([]byte, 64)
+					_, err = stream.Read(addr)
 					if err != nil {
+						log.Println(err)
 						return
+
 					}
-					if err1 != nil {
-						return
+
+					defer stream.Close()
+
+					for i, b := range addr {
+						if rune(b) == rune('$') {
+							addr = addr[:i]
+						}
 					}
-				}
 
-			}()
-
-			go func() {
-
-				//defer conn.Close()
-				buf := make([]byte, 4*1024)
-
-				for {
-					n, err1 := conn.Read(buf)
-
-					_, err = stream.Write(buf[:n])
+					conn, err := net.Dial("tcp", string(addr))
 					if err != nil {
+						stream.Write([]byte{0x2})
 						return
 					}
-					if err1 != nil {
-						return
-					}
-				}
-			}()
 
+					defer conn.Close()
+
+					_, err = stream.Write([]byte{0x1})
+					if err != nil {
+						log.Println(err)
+						return
+					}
+
+					log.Printf("server: %s-->%s", conn.LocalAddr().String(), conn.RemoteAddr().String())
+
+					streamChan := make(chan interface{}, 2)
+					go func() {
+
+						buf := make([]byte, 4*1024)
+
+						for {
+							n, err1 := stream.Read(buf)
+
+							_, err = conn.Write(buf[:n])
+							if err != nil {
+								streamChan <- err
+								return
+							}
+							if err1 != nil {
+								streamChan <- err1
+								return
+							}
+						}
+
+					}()
+
+					go func() {
+
+						buf := make([]byte, 4*1024)
+
+						for {
+							n, err1 := conn.Read(buf)
+
+							_, err = stream.Write(buf[:n])
+							if err != nil {
+								streamChan <- err
+								return
+							}
+							if err1 != nil {
+								streamChan <- err1
+								return
+							}
+						}
+					}()
+
+					<-streamChan
+					<-streamChan
+
+				}()
+			}
 		}(sess)
 	}
 }
