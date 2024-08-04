@@ -37,12 +37,12 @@ func monitorGoroutineNums() {
 func runServer() {
 	tlsConfig := generateTLSConfig()
 
-	listener, err := quic.ListenAddr("localhost:8888", tlsConfig, &quic.Config{})
+	listener, err := quic.ListenAddr("0.0.0.0:8888", tlsConfig, &quic.Config{})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("Server listening on localhost:8888")
+	fmt.Println("Server listening on 0.0.0.0:8888")
 
 	for {
 		ctx := context.Background()

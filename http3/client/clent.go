@@ -1,40 +1,33 @@
 package main
 
 import (
-	"context"
-	"crypto/tls"
 	"fmt"
-	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"io"
 	"log"
+	"net/http"
 )
 
 func main() {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	ctx := context.Background()
-	session, err := quic.DialAddr(ctx, "localhost:4242", tlsConfig, nil)
-	if err != nil {
-		log.Fatal(err)
+
+	client := &http.Client{
+		Transport: &http3.RoundTripper{},
 	}
 
-	stream, err := session.OpenStreamSync(ctx)
+	// 发出 HTTP/3 请求
+	resp, err := client.Get("https://chrome.com/")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read response body: %v", err)
 	}
 
-	message := "Hello from client"
-	fmt.Printf("Client sending: %s\n", message)
-	_, err = stream.Write([]byte(message))
-	if err != nil {
-		log.Fatal(err)
-	}
-	stream.Close()
-	response, err := io.ReadAll(stream)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("Client received: %s\n", string(response))
+	fmt.Printf("Response status: %s\n", resp.Status)
+	fmt.Printf("Response hgeader:\n%s\n", resp.Header)
+	fmt.Printf("Response body:\n%s\n", body)
 }
